@@ -1,0 +1,56 @@
+[package]
+name = "target-notifier"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.64"
+authors = ["Volkalex28 <anan20000228@gmail.com>"]
+description = """
+    target-notifier is a wrapper over asynchronous channels for sending data 
+    to the target (or multiple) listeners or in broadcast mode
+"""
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/Volkalex28/target_notifier#readme"
+repository = "https://github.com/Volkalex28/target_notifier"
+readme = "README.md"
+categiries = ["asynchronous", "data-structures", "embedded", "no-std"]
+keywords = ["channels", "embassy", "async", "notification"]
+include = [
+    "/src",
+    "/README.md",
+    "/LICENSE_MIT",
+    "/LICENSE_APACHE",
+]
+
+[features]
+async-std = ["async-std/std", "parking_lot", "hybrid-rc"]
+async-channel = ["dep:async-channel", "parking_lot", "hybrid-rc"]
+embassy = ["embassy-sync/std"]
+std = []
+default = ["std"]
+
+[dependencies]
+target-notifier-proc = { path = "./target_notifier_proc" }
+log = "0.4.17"
+
+[dependencies.embassy-sync]
+git = "https://github.com/embassy-rs/embassy"
+optional = true
+
+[dependencies.async-std]
+version = "1.12.0"
+default-features = false
+optional = true
+
+[dependencies.async-channel]
+version = "1.7.1"
+default-features = false
+optional = true
+
+[dependencies.parking_lot]
+version = "0.12.1"
+optional = true
+
+[dependencies.hybrid-rc]
+version = "0.6.0"
+default-features = false
+optional = true
