@@ -48,10 +48,10 @@ mod prelude {
             let ch = channel::bounded(N);
             Self(ch.0, ch.1)
         }
-        pub(super) fn sender<'ch>(&'ch self) -> Sender<'ch, T> {
+        pub(super) fn sender(&self) -> Sender<'_, T> {
             self.0.clone()
         }
-        pub(super) fn receiver<'ch>(&'ch self) -> Receiver<'ch, T> {
+        pub(super) fn receiver(&self) -> Receiver<'_, T> {
             self.1.clone()
         }
     }
@@ -146,7 +146,7 @@ pub enum Error<T> {
     NotInitalized,
     Send(usize, SendError<T>),
 }
-pub static INCORRECT_INDEX: &'static str = "Incorrect channel index";
+pub static INCORRECT_INDEX: &str = "Incorrect channel index";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ID(usize, Option<usize>);
@@ -195,11 +195,11 @@ impl<T, const N: usize> private::DynamicServiceId for Service<T, N> {
 }
 impl<'f, T, const N: usize> private::DynamicService<'f, T> for Service<T, N> {
     fn sender(&'f self) -> prelude::Sender<'f, T> {
-        self.1.sender().into()
+        self.1.sender()
     }
 
     fn receiver(&'f self) -> prelude::Receiver<'f, T> {
-        self.1.receiver().into()
+        self.1.receiver()
     }
 }
 impl<T, const N: usize> private::DynamicServiceState for Service<T, N> {
@@ -303,7 +303,7 @@ impl<'notif, Notif> Sender<'notif, Notif> {
     where
         Notif: Notifier<'notif, T, Type = T>,
     {
-        self.send_impl(Err(Error::NotInitalized), |_| true, event)
+        self.send_impl(Err(Error::<T>::NotInitalized), |_| true, event)
     }
 
     pub fn send_to<Target: Into<ID> + Copy, T: Clone + 'static, const S: usize>(
@@ -317,13 +317,13 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         let ret = if targets.is_empty() {
             Ok(())
         } else {
-            Err(Error::NotInitalized)
+            Err(Error::<T>::NotInitalized)
         };
 
         let targets: [ID; S] = targets.map(|target| target.into());
         self.send_impl(
             ret,
-            |id| targets.iter().find(|t_id| id.eq_target(t_id)).is_some(),
+            |id| targets.iter().any(|t_id| id.eq_target(t_id)),
             event,
         )
     }

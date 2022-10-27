@@ -29,7 +29,7 @@ std = []
 default = ["std"]
 
 [dependencies]
-target-notifier-proc = { path = "./target_notifier_proc" }
+target-notifier-proc = { path = "./proc" }
 log = "0.4.17"
 
 [dependencies.embassy-sync]
