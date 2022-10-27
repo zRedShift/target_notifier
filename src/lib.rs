@@ -1,7 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// extern crate target_notifier_proc;
-
 use core::ops::{Deref, DerefMut};
 
 pub use prelude::RecvFuture;
@@ -195,11 +193,11 @@ impl<T, const N: usize> private::DynamicServiceId for Service<T, N> {
 }
 impl<'f, T, const N: usize> private::DynamicService<'f, T> for Service<T, N> {
     fn sender(&'f self) -> prelude::Sender<'f, T> {
-        self.1.sender()
+        self.1.sender().into()
     }
 
     fn receiver(&'f self) -> prelude::Receiver<'f, T> {
-        self.1.receiver()
+        self.1.receiver().into()
     }
 }
 impl<T, const N: usize> private::DynamicServiceState for Service<T, N> {
