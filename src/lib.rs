@@ -121,7 +121,7 @@ impl ServiceState {
     }
     fn decr(&mut self) {
         *self = match &*self {
-            ServiceState::Active(count) if *count > 0 => ServiceState::Active(*count - 1),
+            ServiceState::Active(count) if *count > 1 => ServiceState::Active(*count - 1),
             _ => ServiceState::Inactive,
         }
     }
