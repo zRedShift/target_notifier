@@ -1,6 +1,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use core::ops::{Deref, DerefMut};
+use core::{
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+};
 
 pub use prelude::RecvFuture;
 pub use prelude::{RecvError, SendError};
@@ -92,7 +95,7 @@ pub trait ServiceGet<'ch, const ID: usize, T> {
 pub trait ChannelGet<'ch, const ID: usize, const SIZE: usize> {
     fn get(&'ch self, index: usize) -> &'ch dyn DynamicServiceId;
 }
-pub trait Notifier<'ch, T: 'static> {
+pub trait Notifier<'ch, T> {
     type Type;
     fn send(
         &'ch self,
@@ -281,6 +284,11 @@ impl<'ch, T> Receiver<'ch, T> {
         InactiveReceiver(self.1)
     }
 }
+impl<'ch, T> Clone for Receiver<'ch, T> {
+    fn clone(&self) -> Self {
+        Self::new(self.1)
+    }
+}
 impl<'ch, T> Drop for Receiver<'ch, T> {
     fn drop(&mut self) {
         self.1.state(&mut |state| state.decr());
@@ -297,14 +305,18 @@ impl<'ch, T> InactiveReceiver<'ch, T> {
 #[derive(Clone, Copy)]
 pub struct Sender<'notif, Notif>(ID, &'notif Notif);
 impl<'notif, Notif> Sender<'notif, Notif> {
-    pub fn send<T: Clone + 'static>(&self, event: T) -> Result<(), Error<T>>
+    pub fn send<T: Debug + Clone>(&self, event: T) -> Result<(), Error<T>>
     where
         Notif: Notifier<'notif, T, Type = T>,
     {
-        self.send_impl(Err(Error::<T>::NotInitalized), |_| true, event)
+        self.send_impl(
+            Err(Error::<T>::NotInitalized),
+            |_, state| state.is_active(),
+            event,
+        )
     }
 
-    pub fn send_to<Target: Into<ID> + Copy, T: Clone + 'static, const S: usize>(
+    pub fn send_to<Target: Into<ID> + Copy, T: Debug + Clone, const S: usize>(
         &self,
         targets: [Target; S],
         event: T,
@@ -321,12 +333,12 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         let targets: [ID; S] = targets.map(|target| target.into());
         self.send_impl(
             ret,
-            |id| targets.iter().any(|t_id| id.eq_target(t_id)),
+            |id, _| targets.iter().any(|t_id| id.eq_target(t_id)),
             event,
         )
     }
 
-    fn send_impl<'a, F, T: Clone + 'static>(
+    fn send_impl<'a, F, T: Debug + Clone>(
         &self,
         mut ret: Result<(), Error<T>>,
         mut filter: F,
@@ -334,11 +346,11 @@ impl<'notif, Notif> Sender<'notif, Notif> {
     ) -> Result<(), Error<T>>
     where
         Notif: Notifier<'notif, T, Type = T>,
-        F: FnMut(&ID) -> bool,
+        F: FnMut(&ID, ServiceState) -> bool,
     {
         self.1.send(|slice| {
             for (id, res) in slice.filter_map(|field| match field.id() {
-                Some(id) if id != &self.0 && filter(id) && field.get_state().is_active() => {
+                Some(id) if id != &self.0 && filter(id, field.get_state()) => {
                     Some((id, field.sender().try_send(event.clone())))
                 }
                 _ => None,
@@ -349,11 +361,17 @@ impl<'notif, Notif> Sender<'notif, Notif> {
                 } else if ret.is_err() {
                     ret = Ok(())
                 }
-                log::info!("Send; Sended to {id:?}");
+                log::info!(target: "notifier", "Sended to {id:?}");
             }
         });
 
         ret
+    }
+}
+
+pub trait NotifierSender: Sized {
+    fn sender(&self) -> Sender<Self> {
+        Sender(ID(usize::MAX, None), self)
     }
 }
 

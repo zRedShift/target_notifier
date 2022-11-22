@@ -433,6 +433,11 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
     let channel_get = channel_get(name, &crate_path, target, &parsed);
     let service_get = service_get(name, &crate_path, target, &parsed);
     let notifier = notifier(name, &crate_path, &parsed);
+    let sender = {
+        quote!(
+            impl #crate_path ::NotifierSender for #name {}
+        )
+    };
 
     let r#impl = {
         let mut output = TokenStream2::new();
@@ -500,6 +505,7 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
         #channel_get
         #service_get
         #notifier
+        #sender
         #r#impl
     )
 }
