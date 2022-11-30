@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(type_alias_impl_trait)]
 
 use core::{
     fmt::Debug,
@@ -305,6 +306,10 @@ impl<'ch, T> InactiveReceiver<'ch, T> {
 #[derive(Clone, Copy)]
 pub struct Sender<'notif, Notif>(ID, &'notif Notif);
 impl<'notif, Notif> Sender<'notif, Notif> {
+    pub fn id(&self) -> ID {
+        self.0
+    }
+    
     pub fn send<T: Debug + Clone>(&self, event: T) -> Result<(), Error<T>>
     where
         Notif: Notifier<'notif, T, Type = T>,
@@ -337,6 +342,10 @@ impl<'notif, Notif> Sender<'notif, Notif> {
             event,
         )
     }
+    
+    pub fn typed<T>(&self) -> TypedSender<T, Notif> {
+        TypedSender(self.0, self.1, Default::default())
+    }
 
     fn send_impl<'a, F, T: Debug + Clone>(
         &self,
@@ -366,6 +375,21 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         });
 
         ret
+    }
+}
+
+pub struct TypedSender<'notif, T, Notif>(ID, &'notif Notif, core::marker::PhantomData<T>);
+
+impl<'n, Notif, T> channel_bridge::Sender for TypedSender<'n, T, Notif>
+where
+    Notif: Notifier<'n, T, Type = T>,
+    T: Clone + Debug,
+{
+    type Error = Error<T>;
+    type Data = T;
+
+    fn send<'a>(&'a mut self, data: &'a Self::Data) -> Result<(), Self::Error> {
+        Sender(self.0, self.1).send(data.clone())
     }
 }
 
