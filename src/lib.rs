@@ -342,10 +342,6 @@ impl<'notif, Notif> Sender<'notif, Notif> {
             event,
         )
     }
-    
-    pub fn typed<T>(&self) -> TypedSender<T, Notif> {
-        TypedSender(self.0, self.1, Default::default())
-    }
 
     fn send_impl<'a, F, T: Debug + Clone>(
         &self,
