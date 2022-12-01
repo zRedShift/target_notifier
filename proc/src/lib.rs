@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use heck::ToUpperCamelCase;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal, TokenStream as TokenStream2};
 use quote::quote;
@@ -191,13 +192,14 @@ fn targets(
     let from = servs.iter().fold(
         TokenStream2::new(),
         |mut output, Services { upper, id, ty, .. }| {
+            let name = syn::LitStr::new(&upper.to_string().to_upper_camel_case(), upper.span());
             output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
                 quote!(#target::#upper (index) => match index {
                     Some(index) => #crate_path::ID::new(#id).index(index),
                     None => #crate_path::ID::new(#id)
-                },)
+                }.name(#name),)
             } else {
-                quote!(#target::#upper => #crate_path::ID::new(#id),)
+                quote!(#target::#upper => #crate_path::ID::new(#id).name(#name),)
             });
             output
         },
