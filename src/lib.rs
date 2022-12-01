@@ -1,8 +1,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use core::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     ops::{Deref, DerefMut},
+    usize,
 };
 
 pub use prelude::RecvFuture;
@@ -149,20 +150,33 @@ pub enum Error<T> {
 }
 pub static INCORRECT_INDEX: &str = "Incorrect channel index";
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ID(usize, Option<usize>);
+#[derive(Clone, Copy, PartialEq)]
+pub struct ID(usize, Option<usize>, &'static str);
 impl ID {
     pub fn new(id: usize) -> Self {
-        Self(id, None)
+        Self(id, None, &"")
     }
     pub fn index(mut self, index: usize) -> Self {
         self.1 = Some(index);
+        self
+    }
+    pub fn name(mut self, name: &'static str) -> Self {
+        self.2 = name;
         self
     }
     fn eq_target(&self, other: &Self) -> bool {
         match other.1 {
             Some(_) => self.eq(other),
             None => self.0 == other.0,
+        }
+    }
+}
+impl Display for ID {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match (self.0, self.1) {
+            (usize::MAX, _) => write!(f, "[{}]", self.2),
+            (id, None) => write!(f, "[{}](Id: {id})", self.2),
+            (id, Some(index)) => write!(f, "[{}({index})](Id: {id})", self.2),
         }
     }
 }
@@ -217,13 +231,19 @@ impl<T, const N: usize> private::DynamicServiceState for Service<T, N> {
 pub struct Channel<'notif, const I: usize, Notif>(Option<usize>, &'notif Notif);
 impl<'notif, const I: usize, Notif> Channel<'notif, I, Notif> {
     pub fn sender(&self) -> Sender<'notif, Notif> {
-        Sender(ID(I, self.0), self.1)
+        Sender(ID(I, self.0, &""), self.1)
     }
-    pub fn receiver<T: 'static>(&'notif self) -> Receiver<'_, T>
+    pub fn receiver<T>(&self) -> Receiver<'notif, T>
     where
         Notif: ServiceGet<'notif, I, T>,
     {
         Receiver::new(self.1.get(self.0))
+    }
+    pub fn split<T>(&self) -> (Sender<'notif, Notif>, Receiver<'notif, T>)
+    where
+        Notif: ServiceGet<'notif, I, T>,
+    {
+        (self.sender(), self.receiver())
     }
 }
 
@@ -320,23 +340,19 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         )
     }
 
-    pub fn send_to<Target: Into<ID> + Copy, T: Debug + Clone, const S: usize>(
+    pub fn send_to<Target: Copy, T: Debug + Clone, const S: usize>(
         &self,
         targets: [Target; S],
         event: T,
     ) -> Result<(), Error<T>>
     where
+        ID: From<Target>,
         Notif: Notifier<'notif, T, Type = T>,
     {
-        let ret = if targets.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::<T>::NotInitalized)
-        };
+        let targets = targets.map(ID::from);
 
-        let targets: [ID; S] = targets.map(|target| target.into());
         self.send_impl(
-            ret,
+            Ok(()),
             |id, _| targets.iter().any(|t_id| id.eq_target(t_id)),
             event,
         )
@@ -361,11 +377,10 @@ impl<'notif, Notif> Sender<'notif, Notif> {
             }) {
                 if let Err(error) = res {
                     ret = Err(Error::Send(id.0, error));
-                    break;
-                } else if ret.is_err() {
-                    ret = Ok(())
+                    log::info!("Error sending to {id}");
+                } else {
+                    log::info!("Sended to {id}");
                 }
-                log::info!(target: "notifier", "Sended to {id:?}");
             }
         });
 
@@ -375,7 +390,7 @@ impl<'notif, Notif> Sender<'notif, Notif> {
 
 pub trait NotifierSender: Sized {
     fn sender(&self) -> Sender<Self> {
-        Sender(ID(usize::MAX, None), self)
+        Sender(ID(usize::MAX, None, &"Global"), self)
     }
 }
 
