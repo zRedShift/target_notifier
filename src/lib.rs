@@ -124,11 +124,16 @@ impl ServiceState {
             ServiceState::Active(count) => ServiceState::Active(*count + 1),
         }
     }
-    fn decr(&mut self) {
+    fn decr(&mut self) -> bool {
+        let mut ret = false;
         *self = match &*self {
             ServiceState::Active(count) if *count > 1 => ServiceState::Active(*count - 1),
-            _ => ServiceState::Inactive,
-        }
+            _ => {
+                ret = true;
+                ServiceState::Inactive
+            }
+        };
+        ret
     }
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active(_))
@@ -352,7 +357,11 @@ impl<'ch, T> Clone for Receiver<'ch, T> {
 }
 impl<'ch, T> Drop for Receiver<'ch, T> {
     fn drop(&mut self) {
-        self.1.state(&mut |state| state.decr());
+        let mut to_clear = false;
+        self.1.state(&mut |state| to_clear = state.decr());
+        if to_clear {
+            while self.0.try_recv().is_ok() {}
+        }
     }
 }
 
