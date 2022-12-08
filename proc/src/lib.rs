@@ -158,11 +158,11 @@ fn targets(
             output
         },
     );
-
     output.extend(quote!(
         #[derive(Debug, Clone, Copy)]
         #vis enum #target {
             #r#enum
+            GLOBAL_SENDER,
         }
     ));
 
@@ -178,38 +178,83 @@ fn targets(
             output
         },
     );
-
     output.extend(quote!(
         impl #target {
             pub const fn id(&self) -> usize {
                 match self {
                     #r#impl
+                    Self::GLOBAL_SENDER => usize::MAX,
                 }
             }
         }
     ));
 
-    let from = servs.iter().fold(
+    let from_id = servs.iter().fold(
         TokenStream2::new(),
         |mut output, Services { upper, id, ty, .. }| {
-            let name = syn::LitStr::new(&upper.to_string().to_upper_camel_case(), upper.span());
             output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
                 quote!(#target::#upper (index) => match index {
-                    Some(index) => #crate_path::ID::new(#id).index(index),
+                    Some(index) => #crate_path::ID::new(#id).set_index(index),
                     None => #crate_path::ID::new(#id)
-                }.name(#name),)
+                }.set_name(target.into()),)
             } else {
-                quote!(#target::#upper => #crate_path::ID::new(#id).name(#name),)
+                quote!(#target::#upper => #crate_path::ID::new(#id).set_name(target.into()),)
             });
             output
         },
     );
-
     output.extend(quote!(
         impl From<#target> for #crate_path::ID {
             fn from(target: #target) -> Self {
                 match target {
-                    #from
+                    #from_id
+                    #target ::GLOBAL_SENDER => #crate_path::ID::new(usize::MAX).set_name(target.into())
+                }
+            }
+        }
+    ));
+
+    let from_usize = servs.iter().fold(
+        TokenStream2::new(),
+        |mut output, Services { upper, id, ty, .. }| {
+            output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
+                quote!(#id => Self::#upper (None),)
+            } else {
+                quote!(#id => Self::#upper,)
+            });
+            output
+        },
+    );
+    output.extend(quote!(
+        impl From<usize> for #target {
+            fn from(id: usize) -> Self {
+                match id {
+                    #from_usize
+                    _ => Self::GLOBAL_SENDER,
+                }
+            }
+        }
+    ));
+
+    let from_str = servs.iter().fold(
+        TokenStream2::new(),
+        |mut output, Services { upper, ty, .. }| {
+            let name = syn::LitStr::new(&upper.to_string().to_upper_camel_case(), upper.span());
+            let upper = if matches!(ty, FieldTypes::Array(_, _)) {
+                quote!(#upper (_))
+            } else {
+                quote!(#upper)
+            };
+            output.extend(quote!(#target ::#upper => #name,));
+            output
+        },
+    );
+    output.extend(quote!(
+        impl From<#target> for &'static str {
+            fn from(target: #target) -> Self {
+                match target {
+                    #from_str
+                    #target ::GLOBAL_SENDER => "Global"
                 }
             }
         }
@@ -238,7 +283,7 @@ fn channel_get(
                 _ => todo!(),
             };
             output.extend(quote!(
-                impl #crate_path::ChannelGet<'_, { #target::#upper (None).id() }, {#count}> for #name {
+                impl #crate_path::ChannelGet<{ #target::#upper (None).id() }, {#count}> for #name {
                     fn get(&self, index: usize) -> &dyn #crate_path::DynamicServiceId {
                         #preffix self.#ident.get(index).expect(#crate_path::INCORRECT_INDEX)#suffix
                     }
@@ -266,8 +311,8 @@ fn service_get(
             suffix: &TokenStream2
         | -> TokenStream2 {
             quote!(
-                impl #crate_path::ServiceGet<'_, { #target::#id.id() }, #ty> for #name {
-                    fn get(&self, #index: Option<usize>) -> &'_ dyn #crate_path::DynamicService<'_, #ty> {
+                impl #crate_path::ServiceGet<{ #target::#id.id() }, #ty> for #name {
+                    fn get(&self, #index: Option<usize>) -> &'_ dyn #crate_path::DynamicService<#ty> {
                         #preffix self.#ident #suffix
                     }
                 }
@@ -310,7 +355,7 @@ fn service_get(
     output
 }
 
-fn notifier(
+fn notifier_senders(
     name: &Ident,
     crate_path: &TokenStream2,
     servs: &Vec<Services>
@@ -364,7 +409,7 @@ fn notifier(
         
         sorted.into_iter().fold(TokenStream2::new(), |mut output, (ty, vec)| {
             let iters = vec.into_iter().enumerate().fold(TokenStream2::new(), |mut output, (index, notif)| {
-                let r#as = quote!( as &dyn #crate_path::DynamicService<'ch, Self::Type>);
+                let r#as = quote!( as &dyn #crate_path::DynamicService<#ty>);
                 let preffix = match &notif {
                     NotifTypes::Once(_, Some(_)) | NotifTypes::Array(_, Some(_)) => {
                         quote!(&)
@@ -392,17 +437,13 @@ fn notifier(
                 output
             });
             output.extend(quote!(
-                impl<'ch> #crate_path::Notifier<'ch, #ty> for #name {
-                    type Type = #ty;
-                    fn send(
-                        &'ch self, 
-                        mut send: impl FnMut(
-                            &'_ mut dyn Iterator<Item = &'ch dyn #crate_path::DynamicService<'ch, Self::Type>>
-                        )
-                    ) {
-                        let mut iter = #iters
-                        .into_iter();
-                        send(&mut iter)
+                impl #crate_path::NotifierSenders<#ty> for #name {
+                    type Iter<'ch> = impl Iterator<Item = &'ch dyn DynamicService<#ty>> + Clone 
+                        where 
+                            #ty: 'ch,
+                            Self: 'ch;
+                    fn get<'ch>(&'ch self) -> Self::Iter<'ch> {
+                        #iters
                     }
                 }
             ));
@@ -434,11 +475,25 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
     let targets = targets(vis, &crate_path, target, &parsed);
     let channel_get = channel_get(name, &crate_path, target, &parsed);
     let service_get = service_get(name, &crate_path, target, &parsed);
-    let notifier = notifier(name, &crate_path, &parsed);
-    let sender = {
+    let notifier_senders = notifier_senders(name, &crate_path, &parsed);
+    let notifier = {
         quote!(
-            impl #crate_path ::NotifierSender for #name {}
+            impl #crate_path ::Notifier for #name {}
         )
+    };
+    let aliases = {
+        let mut output = TokenStream2::new();
+
+        let alias = Ident::new(&(name.to_string()+"Channel"), name.span());
+        output.extend(quote!(#vis type #alias <'a, const I: usize> = #crate_path::Channel<'a, I, #name, #target>;));
+        let alias = Ident::new(&(name.to_string()+"Channels"), name.span());
+        output.extend(quote!(#vis type #alias <'a, const I: usize, const U: usize> = #crate_path::Channels<'a, I, U, #name, #target>;));
+        let alias = Ident::new(&(name.to_string()+"Sender"), name.span());
+        output.extend(quote!(#vis type #alias <'a> = #crate_path::Sender<'a, #name>;));
+        let alias = Ident::new(&(name.to_string()+"Receiver"), name.span());
+        output.extend(quote!(#vis type #alias <'a, T> = #crate_path::Receiver<'a, T>;));
+
+        output
     };
 
     let r#impl = {
@@ -447,12 +502,12 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
         parsed.iter().for_each(|Services { ident, upper, ty, .. }| {
             output.extend(match ty {
                 FieldTypes::Once(_, _) | FieldTypes::Tuple(_) => quote!(
-                    pub fn #ident(&self) -> #crate_path::Channel<'_, { #target::#upper.id() }, Self> {
+                    pub fn #ident(&self) -> #crate_path::Channel<'_, { #target::#upper.id() }, Self, #target> {
                         self.into()
                     }
                 ),
                 FieldTypes::Array(_, expr) => quote!(
-                    pub fn #ident(&self) -> #crate_path::Channels<'_, { #target::#upper(None).id() }, { #expr }, Self> {
+                    pub fn #ident(&self) -> #crate_path::Channels<'_, { #target::#upper(None).id() }, { #expr }, Self, #target> {
                         #crate_path::Channels::new(&self)
                     }
                 ),
@@ -503,11 +558,12 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
     };
 
     quote!(
+        #aliases
         #targets
         #channel_get
         #service_get
+        #notifier_senders
         #notifier
-        #sender
         #r#impl
     )
 }

@@ -2,6 +2,7 @@
 
 use core::{
     fmt::{Debug, Display},
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     usize,
 };
@@ -90,20 +91,20 @@ mod prelude {
     }
 }
 
-pub trait ServiceGet<'ch, const ID: usize, T> {
-    fn get(&'ch self, index: Option<usize>) -> &'ch dyn DynamicService<'ch, T>;
+pub trait ServiceGet<const ID: usize, T> {
+    fn get(&self, index: Option<usize>) -> &dyn DynamicService<T>;
 }
-pub trait ChannelGet<'ch, const ID: usize, const SIZE: usize> {
-    fn get(&'ch self, index: usize) -> &'ch dyn DynamicServiceId;
+pub trait ChannelGet<const ID: usize, const SIZE: usize> {
+    fn get(&self, index: usize) -> &dyn DynamicServiceId;
 }
-pub trait Notifier<'ch, T> {
-    type Type;
-    fn send(
-        &'ch self,
-        send: impl FnMut(&'_ mut dyn Iterator<Item = &'ch dyn DynamicService<'ch, T>>),
-    );
+pub trait NotifierSenders<T> {
+    type Iter<'ch>: Iterator<Item = &'ch dyn DynamicService<T>> + Clone
+    where
+        T: 'ch,
+        Self: 'ch;
+    fn get<'ch>(&'ch self) -> Self::Iter<'ch>;
 }
-pub trait DynamicService<'f, T>: private::DynamicService<'f, T> {}
+pub trait DynamicService<T>: private::DynamicService<T> {}
 pub trait DynamicServiceId: private::DynamicServiceId {}
 pub trait DynamicServiceState: private::DynamicServiceState {
     fn get_state(&self) -> ServiceState {
@@ -156,11 +157,20 @@ impl ID {
     pub fn new(id: usize) -> Self {
         Self(id, None, &"")
     }
-    pub fn index(mut self, index: usize) -> Self {
+    pub fn id(&self) -> usize {
+        self.0
+    }
+    pub fn index(&self) -> Option<usize> {
+        self.1
+    }
+    pub fn name(&self) -> &'static str {
+        self.2
+    }
+    pub fn set_index(mut self, index: usize) -> Self {
         self.1 = Some(index);
         self
     }
-    pub fn name(mut self, name: &'static str) -> Self {
+    pub fn set_name(mut self, name: &'static str) -> Self {
         self.2 = name;
         self
     }
@@ -195,7 +205,7 @@ impl Service<(), 0> {
     {
         arr.iter_mut()
             .enumerate()
-            .for_each(|(index, item)| cb(ID::from(id).index(index), item));
+            .for_each(|(index, item)| cb(ID::from(id).set_index(index), item));
     }
 }
 impl<T, const N: usize> Default for Service<T, N> {
@@ -208,12 +218,12 @@ impl<T, const N: usize> private::DynamicServiceId for Service<T, N> {
         &self.0
     }
 }
-impl<'f, T, const N: usize> private::DynamicService<'f, T> for Service<T, N> {
-    fn sender(&'f self) -> prelude::Sender<'f, T> {
+impl<T, const N: usize> private::DynamicService<T> for Service<T, N> {
+    fn sender<'f>(&'f self) -> prelude::Sender<'f, T> {
         self.1.sender().into()
     }
 
-    fn receiver(&'f self) -> prelude::Receiver<'f, T> {
+    fn receiver<'f>(&'f self) -> prelude::Receiver<'f, T> {
         self.1.receiver().into()
     }
 }
@@ -228,31 +238,47 @@ impl<T, const N: usize> private::DynamicServiceState for Service<T, N> {
     }
 }
 
-pub struct Channel<'notif, const I: usize, Notif>(Option<usize>, &'notif Notif);
-impl<'notif, const I: usize, Notif> Channel<'notif, I, Notif> {
+pub struct Channel<'notif, const I: usize, Notif, Targets>(
+    Option<usize>,
+    &'notif Notif,
+    PhantomData<Targets>,
+);
+impl<'notif, const I: usize, Notif, Targets> Channel<'notif, I, Notif, Targets>
+where
+    Targets: Into<ID> + From<usize>,
+{
     pub fn sender(&self) -> Sender<'notif, Notif> {
-        Sender(ID(I, self.0, &""), self.1)
+        Sender(self.id(), self.1)
     }
     pub fn receiver<T>(&self) -> Receiver<'notif, T>
     where
-        Notif: ServiceGet<'notif, I, T>,
+        Notif: ServiceGet<I, T>,
     {
         Receiver::new(self.1.get(self.0))
     }
     pub fn split<T>(&self) -> (Sender<'notif, Notif>, Receiver<'notif, T>)
     where
-        Notif: ServiceGet<'notif, I, T>,
+        Notif: ServiceGet<I, T>,
     {
         (self.sender(), self.receiver())
     }
+    pub fn id(&self) -> ID {
+        let mut id = Targets::from(I).into();
+        id.1 = self.0;
+        id
+    }
 }
 
-pub struct Channels<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<'notif, I, SIZE>>(
+pub struct Channels<'notif, const I: usize, const SIZE: usize, Notif, Targets>(
     &'notif Notif,
-    [Channel<'notif, I, Notif>; SIZE],
-);
-impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<'notif, I, SIZE>>
-    Channels<'notif, I, SIZE, Notif>
+    [Channel<'notif, I, Notif, Targets>; SIZE],
+)
+where
+    Notif: ChannelGet<I, SIZE>;
+impl<'notif, const I: usize, const SIZE: usize, Notif, Targets>
+    Channels<'notif, I, SIZE, Notif, Targets>
+where
+    Notif: ChannelGet<I, SIZE>,
 {
     pub fn new(notif: &'notif Notif) -> Self {
         Self(
@@ -261,36 +287,51 @@ impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<'notif, I, SIZ
                 notif
                     .get(index)
                     .id()
-                    .map(|index| Channel(index.1, notif))
+                    .map(|index| Channel(index.1, notif, Default::default()))
                     .unwrap()
             }),
         )
     }
+    pub fn sender(&self, index: usize) -> Option<Sender<'notif, Notif>>
+    where
+        Targets: Into<ID> + From<usize>,
+    {
+        self.get(index).map(|ch| ch.sender())
+    }
+    pub fn receiver<T>(&self, index: usize) -> Option<Receiver<'notif, T>>
+    where
+        Notif: ServiceGet<I, T>,
+        Targets: Into<ID> + From<usize>,
+    {
+        self.get(index).map(|ch| ch.receiver())
+    }
 }
-impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<'notif, I, SIZE>> Deref
-    for Channels<'notif, I, SIZE, Notif>
+impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<I, SIZE>, Targets> Deref
+    for Channels<'notif, I, SIZE, Notif, Targets>
 {
-    type Target = [Channel<'notif, I, Notif>; SIZE];
+    type Target = [Channel<'notif, I, Notif, Targets>; SIZE];
     fn deref(&self) -> &Self::Target {
         &self.1
     }
 }
-impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<'notif, I, SIZE>> DerefMut
-    for Channels<'notif, I, SIZE, Notif>
+impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<I, SIZE>, Targets> DerefMut
+    for Channels<'notif, I, SIZE, Notif, Targets>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.1
     }
 }
-impl<'notif, Notif, const I: usize> From<&'notif Notif> for Channel<'notif, I, Notif> {
+impl<'notif, Notif, const I: usize, Targets> From<&'notif Notif>
+    for Channel<'notif, I, Notif, Targets>
+{
     fn from(notif: &'notif Notif) -> Self {
-        Self(None, notif)
+        Self(None, notif, Default::default())
     }
 }
 
-pub struct Receiver<'ch, T>(prelude::Receiver<'ch, T>, &'ch dyn DynamicService<'ch, T>);
+pub struct Receiver<'ch, T>(prelude::Receiver<'ch, T>, &'ch dyn DynamicService<T>);
 impl<'ch, T> Receiver<'ch, T> {
-    fn new(field: &'ch dyn DynamicService<'ch, T>) -> Self {
+    fn new(field: &'ch dyn DynamicService<T>) -> Self {
         field.state(&mut |state| state.incr());
         Self(field.receiver(), field)
     }
@@ -315,7 +356,7 @@ impl<'ch, T> Drop for Receiver<'ch, T> {
     }
 }
 
-pub struct InactiveReceiver<'ch, T>(&'ch dyn DynamicService<'ch, T>);
+pub struct InactiveReceiver<'ch, T>(&'ch dyn DynamicService<T>);
 impl<'ch, T> InactiveReceiver<'ch, T> {
     pub fn activate(self) -> Receiver<'ch, T> {
         Receiver::new(self.0)
@@ -329,79 +370,94 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         self.0
     }
 
+    #[inline]
     pub fn send<T: Debug + Clone>(&self, event: T) -> Result<(), Error<T>>
     where
-        Notif: Notifier<'notif, T, Type = T>,
+        Notif: NotifierSenders<T>,
     {
-        self.send_impl(
-            Err(Error::<T>::NotInitalized),
-            |_, state| state.is_active(),
-            event,
-        )
+        self.send_filtered([], event)
     }
 
-    pub fn send_to<Target: Copy, T: Debug + Clone, const S: usize>(
+    pub fn send_filtered<Target: Copy, T: Debug + Clone, const S: usize>(
         &self,
-        targets: [Target; S],
+        filter: [Target; S],
         event: T,
     ) -> Result<(), Error<T>>
     where
         ID: From<Target>,
-        Notif: Notifier<'notif, T, Type = T>,
+        Notif: NotifierSenders<T>,
     {
-        let targets = targets.map(ID::from);
-
+        let filter = filter.map(ID::from);
         self.send_impl(
-            Ok(()),
-            |id, _| targets.iter().any(|t_id| id.eq_target(t_id)),
+            |id, state| state.is_active() && filter.iter().all(|t_id| !id.eq_target(t_id)),
             event,
         )
     }
 
-    fn send_impl<'a, F, T: Debug + Clone>(
-        &self,
-        mut ret: Result<(), Error<T>>,
-        mut filter: F,
-        event: T,
-    ) -> Result<(), Error<T>>
+    pub fn send_to<Tg, T, const S: usize>(&self, targets: [Tg; S], event: T) -> Result<(), Error<T>>
     where
-        Notif: Notifier<'notif, T, Type = T>,
+        Tg: Copy,
+        T: Debug + Clone,
+        ID: From<Tg>,
+        Notif: NotifierSenders<T>,
+    {
+        let targets = targets.map(ID::from);
+
+        self.send_impl(|id, _| targets.iter().any(|t_id| id.eq_target(t_id)), event)
+    }
+
+    fn send_impl<'a, F, T: Debug + Clone>(&self, mut filter: F, event: T) -> Result<(), Error<T>>
+    where
+        Notif: NotifierSenders<T>,
         F: FnMut(&ID, ServiceState) -> bool,
     {
-        self.1.send(|slice| {
-            for (id, res) in slice.filter_map(|field| match field.id() {
+        let mut ret = Ok(());
+        let mut slice = self
+            .1
+            .get()
+            .filter_map(|field| match field.id() {
                 Some(id) if id != &self.0 && filter(id, field.get_state()) => {
                     Some((id, field.sender().try_send(event.clone())))
                 }
                 _ => None,
-            }) {
-                if let Err(error) = res {
-                    ret = Err(Error::Send(id.0, error));
-                    log::info!("Error sending to {id}");
-                } else {
-                    log::info!("Sended to {id}");
-                }
+            })
+            .peekable();
+        if slice.peek().is_none() {
+            return Err(Error::NotInitalized);
+        }
+        for (id, res) in slice {
+            if let Err(error) = res {
+                ret = Err(Error::Send(id.0, error));
+                log::info!("Error sending to {id}");
+            } else {
+                log::info!("Sended to {id}");
             }
-        });
+        }
 
         ret
     }
 }
 
-pub trait NotifierSender: Sized {
-    fn sender(&self) -> Sender<Self> {
-        Sender(ID(usize::MAX, None, &"Global"), self)
+pub trait Notifier: Sized {
+    fn sender(&self, id: impl Into<ID>) -> Sender<Self> {
+        Sender(id.into(), self)
+    }
+    fn receiver<'a, const I: usize, T>(&'a self, index: Option<usize>) -> Receiver<'a, T>
+    where
+        Self: ServiceGet<I, T>,
+    {
+        Receiver::new(self.get(index))
     }
 }
 
 mod private {
     use super::*;
 
-    pub trait DynamicService<'f, T>: DynamicServiceId + DynamicServiceState {
-        fn sender(&'f self) -> prelude::Sender<'f, T>;
-        fn receiver(&'f self) -> prelude::Receiver<'f, T>;
+    pub trait DynamicService<T>: DynamicServiceId + DynamicServiceState {
+        fn sender<'f>(&'f self) -> prelude::Sender<'f, T>;
+        fn receiver<'f>(&'f self) -> prelude::Receiver<'f, T>;
     }
-    impl<'f, T, F: DynamicService<'f, T>> super::DynamicService<'f, T> for F {}
+    impl<T, F: DynamicService<T>> super::DynamicService<T> for F {}
 
     pub trait DynamicServiceId {
         fn id(&self) -> &Option<ID>;
