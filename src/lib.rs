@@ -102,7 +102,7 @@ pub trait NotifierSenders<T> {
     where
         T: 'ch,
         Self: 'ch;
-    fn get<'ch>(&'ch self) -> Self::Iter<'ch>;
+    fn get(&self) -> Self::Iter<'_>;
 }
 pub trait DynamicService<T>: private::DynamicService<T> {}
 pub trait DynamicServiceId: private::DynamicServiceId {}
@@ -151,7 +151,7 @@ impl ServiceState {
 
 #[derive(Debug)]
 pub enum Error<T> {
-    NotInitalized,
+    NotInitialized,
     Send(usize, SendError<T>),
 }
 pub static INCORRECT_INDEX: &str = "Incorrect channel index";
@@ -160,7 +160,7 @@ pub static INCORRECT_INDEX: &str = "Incorrect channel index";
 pub struct ID(usize, Option<usize>, &'static str);
 impl ID {
     pub fn new(id: usize) -> Self {
-        Self(id, None, &"")
+        Self(id, None, "")
     }
     pub fn id(&self) -> usize {
         self.0
@@ -224,11 +224,11 @@ impl<T, const N: usize> private::DynamicServiceId for Service<T, N> {
     }
 }
 impl<T, const N: usize> private::DynamicService<T> for Service<T, N> {
-    fn sender<'f>(&'f self) -> prelude::Sender<'f, T> {
+    fn sender(&self) -> prelude::Sender<'_, T> {
         self.1.sender().into()
     }
 
-    fn receiver<'f>(&'f self) -> prelude::Receiver<'f, T> {
+    fn receiver(&self) -> prelude::Receiver<'_, T> {
         self.1.receiver().into()
     }
 }
@@ -398,7 +398,9 @@ impl<'notif, Notif> Sender<'notif, Notif> {
     {
         let filter = filter.map(ID::from);
         self.send_impl(
-            |id, state| state.is_active() && filter.iter().all(|t_id| !id.eq_target(t_id)),
+            |id, state| {
+                id != &self.0 && state.is_active() && filter.iter().all(|t_id| !id.eq_target(t_id))
+            },
             event,
         )
     }
@@ -415,7 +417,7 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         self.send_impl(|id, _| targets.iter().any(|t_id| id.eq_target(t_id)), event)
     }
 
-    fn send_impl<'a, F, T: Debug + Clone>(&self, mut filter: F, event: T) -> Result<(), Error<T>>
+    fn send_impl<F, T: Debug + Clone>(&self, mut filter: F, event: T) -> Result<(), Error<T>>
     where
         Notif: NotifierSenders<T>,
         F: FnMut(&ID, ServiceState) -> bool,
@@ -425,21 +427,21 @@ impl<'notif, Notif> Sender<'notif, Notif> {
             .1
             .get()
             .filter_map(|field| match field.id() {
-                Some(id) if id != &self.0 && filter(id, field.get_state()) => {
+                Some(id) if filter(id, field.get_state()) => {
                     Some((id, field.sender().try_send(event.clone())))
                 }
                 _ => None,
             })
             .peekable();
         if slice.peek().is_none() {
-            return Err(Error::NotInitalized);
+            return Err(Error::NotInitialized);
         }
         for (id, res) in slice {
             if let Err(error) = res {
                 ret = Err(Error::Send(id.0, error));
                 log::info!("Error sending to {id}");
             } else {
-                log::info!("Sended to {id}");
+                log::info!("Sent to {id}");
             }
         }
 
@@ -451,7 +453,7 @@ pub trait Notifier: Sized {
     fn sender(&self, id: impl Into<ID>) -> Sender<Self> {
         Sender(id.into(), self)
     }
-    fn receiver<'a, const I: usize, T>(&'a self, index: Option<usize>) -> Receiver<'a, T>
+    fn receiver<const I: usize, T>(&self, index: Option<usize>) -> Receiver<'_, T>
     where
         Self: ServiceGet<I, T>,
     {
@@ -463,8 +465,8 @@ mod private {
     use super::*;
 
     pub trait DynamicService<T>: DynamicServiceId + DynamicServiceState {
-        fn sender<'f>(&'f self) -> prelude::Sender<'f, T>;
-        fn receiver<'f>(&'f self) -> prelude::Receiver<'f, T>;
+        fn sender(&self) -> prelude::Sender<'_, T>;
+        fn receiver(&self) -> prelude::Receiver<'_, T>;
     }
     impl<T, F: DynamicService<T>> super::DynamicService<T> for F {}
 
