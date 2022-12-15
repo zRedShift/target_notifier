@@ -398,7 +398,7 @@ impl<'notif, Notif> Sender<'notif, Notif> {
     {
         let filter = filter.map(ID::from);
         self.send_impl(
-            |id, state| {
+            move |id, state| {
                 id != &self.0 && state.is_active() && filter.iter().all(|t_id| !id.eq_target(t_id))
             },
             event,
@@ -420,30 +420,38 @@ impl<'notif, Notif> Sender<'notif, Notif> {
     fn send_impl<F, T: Debug + Clone>(&self, mut filter: F, event: T) -> Result<(), Error<T>>
     where
         Notif: NotifierSenders<T>,
-        F: FnMut(&ID, ServiceState) -> bool,
+        F: FnMut(&ID, ServiceState) -> bool + Clone,
     {
         let mut ret = Ok(());
-        let mut slice = self
-            .1
-            .get()
-            .filter_map(|field| match field.id() {
-                Some(id) if filter(id, field.get_state()) => {
-                    Some((id, field.sender().try_send(event.clone())))
-                }
-                _ => None,
-            })
-            .peekable();
-        if slice.peek().is_none() {
-            return Err(Error::NotInitialized);
-        }
-        for (id, res) in slice {
-            if let Err(error) = res {
-                ret = Err(Error::Send(id.0, error));
+        let handle_err = |id: &ID, ret: &mut Result<(), Error<T>>, res| {
+            if let Err(err) = res {
                 log::info!("Error sending to {id}");
+                *ret = Err(Error::Send(id.0, err))
             } else {
                 log::info!("Sent to {id}");
             }
-        }
+        };
+
+        let mut slice = self.1.get().filter_map(move |field| match field.id() {
+            Some(id) if filter(id, field.get_state()) => Some((id, field)),
+            _ => None,
+        });
+        let count = slice.clone().count();
+
+        match count {
+            0 => ret = Err(Error::NotInitialized),
+            1 => {
+                let (id, field) = slice.next().unwrap();
+                let res = field.sender().try_send(event);
+                handle_err(id, &mut ret, res)
+            }
+            _ => {
+                for (id, field) in slice {
+                    let res = field.sender().try_send(event.clone());
+                    handle_err(id, &mut ret, res);
+                }
+            }
+        };
 
         ret
     }
