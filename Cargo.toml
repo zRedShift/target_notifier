@@ -22,11 +22,10 @@ include = [
 ]
 
 [features]
-async-std = ["async-std/std", "parking_lot", "hybrid-rc"]
-async-channel = ["dep:async-channel", "parking_lot", "hybrid-rc"]
+async-std = ["async-std/std", "parking_lot", "hybrid-rc", "futures-util"]
+async-channel = ["dep:async-channel", "parking_lot", "hybrid-rc", "futures-util"]
 embassy = ["embassy-sync/std"]
 std = []
-default = ["std"]
 
 [dependencies]
 target-notifier-proc = { path = "./proc" }
@@ -53,4 +52,8 @@ optional = true
 [dependencies.hybrid-rc]
 version = "0.6.0"
 default-features = false
+optional = true
+
+[dependencies.futures-util]
+version = "0.3.25"
 optional = true

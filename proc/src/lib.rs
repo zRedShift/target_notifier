@@ -17,6 +17,7 @@ enum FieldTypes<'a> {
 struct Services<'a> {
     id: usize,
     ident: &'a Ident,
+    attr: TokenStream2,
     upper: Ident,
     ty: FieldTypes<'a>,
 }
@@ -63,14 +64,14 @@ fn parse_field(ty: &Type) -> Result<FieldTypes, syn::Error> {
             .path
             .segments
             .last()
-            .ok_or((quote!(#ty), "Неправильный путь к типу"))
+            .ok_or((quote!(#ty), "Wrong type path"))
             .and_then(|segm| match &segm.arguments {
                 syn::PathArguments::AngleBracketed(args) if args.args.len() == 2 => {
                     Ok((args.args.first().unwrap(), args.args.last().unwrap()))
                 }
                 _ => Err((
                     quote!(#segm),
-                    "Тип должен содержать два шаблонных аргумента",
+                    "The type must contain two template arguments",
                 )),
             })
             .and_then(|(ty, num)| match ty {
@@ -78,10 +79,10 @@ fn parse_field(ty: &Type) -> Result<FieldTypes, syn::Error> {
                     syn::GenericArgument::Const(num) => Ok((ty, num)),
                     _ => Err((
                         quote!(#num),
-                        "Второй тип должен быть константным выражением",
+                        "The second type must be a constant expression",
                     )),
                 },
-                _ => Err((quote!(#ty), "Первый аргумент должен быть типом")),
+                _ => Err((quote!(#ty), "The first argument must be a type")),
             })
             .map(|(ty, num)| FieldTypes::Once(ty, num)),
         Type::Tuple(TypeTuple { elems, .. }) => {
@@ -91,7 +92,7 @@ fn parse_field(ty: &Type) -> Result<FieldTypes, syn::Error> {
                 if let Some(ty) = elems.next() {
                     match parse_field(ty) {
                         Ok(FieldTypes::Once(ty, expr)) => ret.push((ty, expr)),
-                        Ok(_) => break Err((quote!(#ty), "Сервисы могут быть сруппированны только из серсисов, а не других групп или массивов")),
+                        Ok(_) => break Err((quote!(#ty), "Services can only be grouped from services, not other groups or arrays")),
                         Err(err) => return Err(err),
                     }
                 } else {
@@ -103,14 +104,18 @@ fn parse_field(ty: &Type) -> Result<FieldTypes, syn::Error> {
             Ok(ty) => Ok(FieldTypes::Array(Box::new(ty), len)),
             Err(err) => return Err(err),
         }
-        _ => Err((quote!(#ty), "Неподдерживаемый тип")),
+        _ => Err((quote!(#ty), "Unsupported type")),
     }
     .map_err(|(tokens, msg)| syn::Error::new_spanned(tokens, msg))
 }
 
 fn parse(input: &ItemStruct) -> Result<Vec<Services>, TokenStream2> {
+    fn filter_attr(attr: &Vec<Attribute>) -> Option<&Attribute> {
+        attr.iter().find(|attr| matches!(attr.path.segments.first(), Some(segm) if segm.ident.to_string() == "cfg"))
+    }
+
     let mut parsed = Vec::with_capacity(input.fields.len());
-    for (id, ident, res) in input
+    for (id, ident, attr, res) in input
         .fields
         .iter()
         .filter(|field| {
@@ -125,12 +130,13 @@ fn parse(input: &ItemStruct) -> Result<Vec<Services>, TokenStream2> {
                 .is_some()
         })
         .enumerate()
-        .map(|(id, field)| (id, field.ident.as_ref().unwrap(), parse_field(&field.ty)))
+        .map(|(id, field)| (id, field.ident.as_ref().unwrap(), filter_attr(&field.attrs), parse_field(&field.ty)))
     {
         match res {
             Ok(ty) => parsed.push(Services {
                 id,
                 ident,
+                attr: attr.map(|attr| quote!(#attr)).unwrap_or_default(),
                 upper: Ident::new(&ident.to_string().to_uppercase(), ident.span()),
                 ty,
             }),
@@ -150,7 +156,8 @@ fn targets(
 
     let r#enum = servs.iter().fold(
         TokenStream2::new(),
-        |mut output, Services { upper, ty, .. }| {
+        |mut output, Services { upper, ty, attr, .. }| {
+            output.extend(quote!(#attr));
             match ty {
                 FieldTypes::Once(_, _) | FieldTypes::Tuple(_) => output.extend(quote!(#upper,)),
                 FieldTypes::Array(_, _) => output.extend(quote!(#upper (Option<usize>),)),
@@ -168,13 +175,13 @@ fn targets(
 
     let r#impl = servs.iter().fold(
         TokenStream2::new(),
-        |mut output, Services { upper, id, ty, .. }| {
+        |mut output, Services { upper, id, ty, attr, .. }| {
             let upper = if matches!(ty, FieldTypes::Array(_, _)) {
                 quote!(#upper (_))
             } else {
                 quote!(#upper)
             };
-            output.extend(quote!(Self::#upper => #id,));
+            output.extend(quote!(#attr Self::#upper => #id,));
             output
         },
     );
@@ -191,14 +198,14 @@ fn targets(
 
     let from_id = servs.iter().fold(
         TokenStream2::new(),
-        |mut output, Services { upper, id, ty, .. }| {
+        |mut output, Services { upper, id, ty, attr, .. }| {
             output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
                 quote!(#target::#upper (index) => match index {
                     Some(index) => #crate_path::ID::new(#id).set_index(index),
                     None => #crate_path::ID::new(#id)
                 }.set_name(target.into()),)
             } else {
-                quote!(#target::#upper => #crate_path::ID::new(#id).set_name(target.into()),)
+                quote!(#attr #target::#upper => #crate_path::ID::new(#id).set_name(target.into()),)
             });
             output
         },
@@ -216,7 +223,8 @@ fn targets(
 
     let from_usize = servs.iter().fold(
         TokenStream2::new(),
-        |mut output, Services { upper, id, ty, .. }| {
+        |mut output, Services { upper, id, ty, attr, .. }| {
+            output.extend(quote!(#attr));
             output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
                 quote!(#id => Self::#upper (None),)
             } else {
@@ -238,14 +246,14 @@ fn targets(
 
     let from_str = servs.iter().fold(
         TokenStream2::new(),
-        |mut output, Services { upper, ty, .. }| {
+        |mut output, Services { upper, ty, attr, .. }| {
             let name = syn::LitStr::new(&upper.to_string().to_upper_camel_case(), upper.span());
             let upper = if matches!(ty, FieldTypes::Array(_, _)) {
                 quote!(#upper (_))
             } else {
                 quote!(#upper)
             };
-            output.extend(quote!(#target ::#upper => #name,));
+            output.extend(quote!(#attr #target ::#upper => #name,));
             output
         },
     );
@@ -274,7 +282,7 @@ fn channel_get(
     servs
         .iter()
         .filter(|Services { ty, .. }| matches!(ty, FieldTypes::Array(_, _)))
-        .for_each(|Services { upper, ident, ty, .. }| {
+        .for_each(|Services { upper, ident, ty, attr, .. }| {
             let (count, (preffix, suffix)) = match ty {
                 FieldTypes::Array(ty, ret) => (ret, match ty.as_ref() {
                     FieldTypes::Tuple(_) => (quote!(&), quote!(.0)),
@@ -283,6 +291,7 @@ fn channel_get(
                 _ => todo!(),
             };
             output.extend(quote!(
+                #attr
                 impl #crate_path::ChannelGet<{ #target::#upper (None).id() }, {#count}> for #name {
                     fn get(&self, index: usize) -> &dyn #crate_path::DynamicServiceId {
                         #preffix self.#ident.get(index).expect(#crate_path::INCORRECT_INDEX)#suffix
@@ -302,7 +311,7 @@ fn service_get(
 ) -> TokenStream2 {
     let mut output = TokenStream2::new();
 
-    servs.iter().for_each(|Services { upper, ident, ty, .. }| {
+    servs.iter().for_each(|Services { upper, ident, ty, attr, .. }| {
         let make = |
             id: &TokenStream2, 
             ty: &Type, 
@@ -311,6 +320,7 @@ fn service_get(
             suffix: &TokenStream2
         | -> TokenStream2 {
             quote!(
+                #attr
                 impl #crate_path::ServiceGet<{ #target::#id.id() }, #ty> for #name {
                     fn get(&self, #index: Option<usize>) -> &'_ dyn #crate_path::DynamicService<#ty> {
                         #preffix self.#ident #suffix
@@ -361,26 +371,28 @@ fn notifier_senders(
     servs: &Vec<Services>
 ) -> TokenStream2 {
         fn insert<'a>(
-            map: &mut HashMap<&'a Type, Vec<NotifTypes<'a>>>,
+            map: &mut HashMap<&'a Type, Vec<(NotifTypes<'a>, &'a TokenStream2)>>,
             ty: &'a Type,
             ident: NotifTypes<'a>,
+            attr: &'a TokenStream2,
         ) {
             match map.get_mut(ty) {
-                Some(vec) => vec.push(ident),
+                Some(vec) => vec.push((ident, attr)),
                 None => {
-                    map.insert(ty, vec![ident]);
+                    map.insert(ty, vec![(ident, attr)]);
                 }
             }
         }
 
-        let sorted = servs.iter().fold(
-            HashMap::<&Type, Vec<NotifTypes>>::new(),
-            |mut map, Services { ident, ty, .. }| {
+        servs.iter().fold(
+            HashMap::<&Type, Vec<(NotifTypes, &TokenStream2)>>::new(),
+            |mut map, Services { ident, ty, attr, .. }| {
                 fn wrap<'a>(
-                    map: &mut HashMap<&'a Type, Vec<NotifTypes<'a>>>,
+                    map: &mut HashMap<&'a Type, Vec<(NotifTypes<'a>, &'a TokenStream2)>>,
                     ty: &'a FieldTypes,
                     ident: &'a Ident,
                     arr: bool,
+                    attr: &'a TokenStream2,
                 ) {
                     let wrap = |ident, index| {
                         if arr {
@@ -390,25 +402,25 @@ fn notifier_senders(
                         }
                     };
                     match ty {
-                        FieldTypes::Once(ty, _) => insert(map, ty, wrap(ident, None)),
+                        FieldTypes::Once(ty, _) => insert(map, ty, wrap(ident, None), attr),
                         FieldTypes::Tuple(vec) => vec
                             .into_iter()
                             .enumerate()
-                            .for_each(|(index, (ty, _))| insert(map, ty, wrap(ident, Some(index)))),
-                        FieldTypes::Array(_, _) => todo!(),
+                            .for_each(|(index, (ty, _))| insert(map, ty, wrap(ident, Some(index)), attr)),
+                        FieldTypes::Array(_, _) => unreachable!(),
                     }
                 }
 
                 match ty {
-                    FieldTypes::Array(ty, _) => wrap(&mut map, ty, ident, true),
-                    _ => wrap(&mut map, ty, ident, false),
+                    FieldTypes::Array(ty, _) => wrap(&mut map, ty, ident, true, attr),
+                    _ => wrap(&mut map, ty, ident, false, attr),
                 }
                 map
             },
-        );
-        
-        sorted.into_iter().fold(TokenStream2::new(), |mut output, (ty, vec)| {
-            let iters = vec.into_iter().enumerate().fold(TokenStream2::new(), |mut output, (index, notif)| {
+        )
+        .into_iter()
+        .fold(TokenStream2::new(), |mut output, (ty, vec)| {
+            let iters = vec.into_iter().fold(TokenStream2::new(), |mut output, (notif, attr)| {
                 let r#as = quote!( as &dyn #crate_path::DynamicService<#ty>);
                 let preffix = match &notif {
                     NotifTypes::Once(_, Some(_)) | NotifTypes::Array(_, Some(_)) => {
@@ -429,11 +441,7 @@ fn notifier_senders(
                         .map(|item| #preffix item #suffix #r#as)
                     ),
                 };
-                output.extend(if index != 0 {
-                    quote!(.chain(#ret))
-                } else {
-                    ret
-                });
+                output.extend(quote!(#attr let iter = iter.chain(#ret);));
                 output
             });
             output.extend(quote!(
@@ -443,7 +451,9 @@ fn notifier_senders(
                             #ty: 'ch,
                             Self: 'ch;
                     fn get<'ch>(&'ch self) -> Self::Iter<'ch> {
+                        let iter = [].into_iter();
                         #iters
+                        iter
                     }
                 }
             ));
@@ -463,7 +473,7 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
         panic!("{name} should be structure with named fields")
     };
     if attrs.get("targets").is_none() {
-        panic!("Attrribute \"targets\" not found")
+        panic!("Attribute \"targets\" not found")
     }
 
     let parsed = match parse(input) {
@@ -499,7 +509,8 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
     let r#impl = {
         let mut output = TokenStream2::new();
 
-        parsed.iter().for_each(|Services { ident, upper, ty, .. }| {
+        parsed.iter().for_each(|Services { ident, upper, ty, attr, .. }| {
+            output.extend(quote!(#attr));
             output.extend(match ty {
                 FieldTypes::Once(_, _) | FieldTypes::Tuple(_) => quote!(
                     pub fn #ident(&self) -> #crate_path::Channel<'_, { #target::#upper.id() }, Self, #target> {
@@ -513,13 +524,17 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
                 ),
             });
         });
-        let init = parsed.iter().fold(TokenStream2::new(), |mut output, Services { ident, upper, ty, .. }| {
+        let init = parsed.iter().fold(TokenStream2::new(), |
+            mut output, 
+            Services { ident, upper, ty, attr, .. }
+        | {
             output.extend(match ty {
-                FieldTypes::Once(_, _) => quote!(self.#ident.init(#target::#upper);),
+                FieldTypes::Once(_, _) => quote!(#attr self.#ident.init(#target::#upper);),
                 FieldTypes::Tuple(vec) => {
                     vec.iter().enumerate().fold(TokenStream2::new(), |mut output, (index, _)| {
                         let index = Literal::usize_unsuffixed(index);
                         output.extend(quote!(
+                            #attr
                             self.#ident.#index.init(#target::#upper);
                         ));
                         output
@@ -540,6 +555,7 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
                         FieldTypes::Array(_, _) => todo!(),
                     };
                     quote!(
+                        #attr
                         #crate_path::Service::array(#target::#upper(None), &mut self.#ident, |id, #ident| {
                             #body
                         });
