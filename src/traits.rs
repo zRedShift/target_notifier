@@ -1,11 +1,9 @@
 use super::*;
 
-pub trait ServiceGet<const ID: usize, T> {
-    fn get(&self, index: Option<usize>) -> &dyn DynamicService<T>;
+pub trait ServiceGet<T> {
+    fn get(&self, target: impl Into<ID>) -> Option<&dyn DynamicService<T>>;
 }
-pub trait ChannelGet<const ID: usize, const SIZE: usize> {
-    fn get(&self, index: usize) -> &dyn DynamicServiceId;
-}
+
 pub trait NotifierSenders<T> {
     type Iter<'ch>: Iterator<Item = &'ch dyn DynamicService<T>> + Clone
     where
@@ -22,15 +20,30 @@ pub trait DynamicServiceState: private::DynamicServiceState {
 }
 
 pub trait Notifier: Sized {
-    fn sender(&self, id: impl Into<ID>) -> Sender<Self> {
-        Sender(id.into(), self)
+    fn sender(&self, target: impl Into<ID>) -> Sender<Self> {
+        Sender(target.into(), self)
     }
-    fn receiver<const I: usize, T>(&self, index: Option<usize>) -> Receiver<'_, T>
+    fn receiver<const ID: usize, T>(&self, index: Option<usize>) -> Receiver<'_, T>
     where
-        Self: ServiceGet<I, T>,
+        Self: marker::ServiceGet<{ ID }, T>,
     {
-        Receiver::new(self.get(index))
+        let id = match index {
+            Some(index) => ID::new(ID).set_index(index),
+            None => ID::new(ID),
+        };
+        self.get(id).map(Receiver::new).expect(INCORRECT_INDEX)
     }
+
+    fn receiver_by_target<T>(&self, target: impl Into<ID>) -> Option<Receiver<'_, T>>
+    where
+        Self: ServiceGet<T>,
+    {
+        self.get(target).map(Receiver::new)
+    }
+}
+
+pub mod marker {
+    pub trait ServiceGet<const ID: usize, T>: super::ServiceGet<T> {}
 }
 
 pub(super) mod private {

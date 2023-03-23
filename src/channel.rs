@@ -1,97 +1,92 @@
 use super::*;
 use core::{
-    marker::PhantomData,
     ops::{Deref, DerefMut},
     usize,
 };
 
-pub struct Channel<'notif, const I: usize, Notif, Targets>(
-    Option<usize>,
-    &'notif Notif,
-    PhantomData<Targets>,
-);
-impl<'notif, const I: usize, Notif, Targets> Channel<'notif, I, Notif, Targets>
+pub struct Channel<'notif, Notif, Targets, const ID: usize> {
+    notifier: &'notif Notif,
+    target: Targets,
+}
+
+impl<'notif, Notif, Targets, const ID: usize> Channel<'notif, Notif, Targets, { ID }>
 where
-    Targets: Into<ID> + From<usize>,
+    Targets: Into<ID> + Copy,
+    Notif: Notifier,
 {
+    pub fn new(notif: &'notif Notif, target: Targets) -> Self {
+        Self {
+            notifier: notif,
+            target,
+        }
+    }
+
     pub fn sender(&self) -> Sender<'notif, Notif> {
-        Sender(self.id(), self.1)
+        Sender(self.id(), self.notifier)
     }
     pub fn receiver<T>(&self) -> Receiver<'notif, T>
     where
-        Notif: ServiceGet<I, T>,
+        Notif: marker::ServiceGet<{ ID }, T>,
     {
-        Receiver::new(self.1.get(self.0))
+        self.notifier.receiver::<{ ID }, T>(self.id().index())
     }
     pub fn split<T>(&self) -> (Sender<'notif, Notif>, Receiver<'notif, T>)
     where
-        Notif: ServiceGet<I, T>,
+        Notif: marker::ServiceGet<{ ID }, T>,
     {
         (self.sender(), self.receiver())
     }
     pub fn id(&self) -> ID {
-        let mut id = Targets::from(I).into();
-        id.1 = self.0;
-        id
+        self.target.into()
     }
 }
 
-pub struct Channels<'notif, const I: usize, const SIZE: usize, Notif, Targets>(
-    &'notif Notif,
-    [Channel<'notif, I, Notif, Targets>; SIZE],
-)
+pub struct Channels<'notif, const SIZE: usize, Notif, Targets, const ID: usize> {
+    array: [Channel<'notif, Notif, Targets, { ID }>; SIZE],
+}
+impl<'notif, const SIZE: usize, Notif, Targets, const ID: usize>
+    Channels<'notif, SIZE, Notif, Targets, { ID }>
 where
-    Notif: ChannelGet<I, SIZE>;
-impl<'notif, const I: usize, const SIZE: usize, Notif, Targets>
-    Channels<'notif, I, SIZE, Notif, Targets>
-where
-    Notif: ChannelGet<I, SIZE>,
+    Notif: Notifier,
 {
-    pub fn new(notif: &'notif Notif) -> Self {
-        Self(
-            notif,
-            core::array::from_fn(|index| {
-                notif
-                    .get(index)
-                    .id()
-                    .map(|index| Channel(index.1, notif, Default::default()))
-                    .unwrap()
+    pub fn new(notif: &'notif Notif, target: Targets) -> Self
+    where
+        ID: From<Targets> + Into<Targets>,
+    {
+        let id = ID::from(target);
+        Self {
+            array: core::array::from_fn(|index| Channel {
+                notifier: notif,
+                target: id.set_index(index).into(),
             }),
-        )
+        }
     }
     pub fn sender(&self, index: usize) -> Option<Sender<'notif, Notif>>
     where
-        Targets: Into<ID> + From<usize>,
+        Targets: Into<ID> + Copy,
     {
-        self.get(index).map(|ch| ch.sender())
+        self.get(index).map(Channel::sender)
     }
     pub fn receiver<T>(&self, index: usize) -> Option<Receiver<'notif, T>>
     where
-        Notif: ServiceGet<I, T>,
-        Targets: Into<ID> + From<usize>,
+        Notif: marker::ServiceGet<{ ID }, T>,
+        Targets: Into<ID> + Copy,
     {
-        self.get(index).map(|ch| ch.receiver())
+        self.get(index).map(Channel::receiver)
     }
 }
-impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<I, SIZE>, Targets> Deref
-    for Channels<'notif, I, SIZE, Notif, Targets>
+impl<'notif, const SIZE: usize, Notif, Targets, const ID: usize> Deref
+    for Channels<'notif, SIZE, Notif, Targets, { ID }>
 {
-    type Target = [Channel<'notif, I, Notif, Targets>; SIZE];
+    type Target = [Channel<'notif, Notif, Targets, { ID }>; SIZE];
     fn deref(&self) -> &Self::Target {
-        &self.1
+        &self.array
     }
 }
-impl<'notif, const I: usize, const SIZE: usize, Notif: ChannelGet<I, SIZE>, Targets> DerefMut
-    for Channels<'notif, I, SIZE, Notif, Targets>
+impl<'notif, const SIZE: usize, Notif, Targets, const ID: usize> DerefMut
+    for Channels<'notif, SIZE, Notif, Targets, { ID }>
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.1
-    }
-}
-impl<'notif, Notif, const I: usize, Targets> From<&'notif Notif>
-    for Channel<'notif, I, Notif, Targets>
-{
-    fn from(notif: &'notif Notif) -> Self {
-        Self(None, notif, Default::default())
+        &mut self.array
     }
 }

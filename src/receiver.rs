@@ -27,6 +27,14 @@ impl<'ch, T> Receiver<'ch, T> {
     pub fn deactivate(self) -> InactiveReceiver<'ch, T> {
         InactiveReceiver(self.1)
     }
+
+    pub fn id(&self) -> Option<&ID> {
+        self.1.id().as_ref()
+    }
+
+    pub fn target<Target: From<ID>>(&self) -> Target {
+        self.1.id().map(Into::into).expect("Bad id")
+    }
 }
 impl<'ch, T> Clone for Receiver<'ch, T> {
     fn clone(&self) -> Self {

@@ -54,10 +54,10 @@ impl<'notif, Notif> Sender<'notif, Notif> {
         let mut ret = Ok(());
         let handle_err = |id: &ID, ret: &mut Result<(), Error<T>>, res| {
             if let Err(err) = res {
-                log::info!("Error sending to {id}");
+                log::error!("Error sending to {id}");
                 *ret = Err(Error::Send(id.0, err))
             } else {
-                log::info!("Sent to {id}");
+                log::debug!("Sent to {id}");
             }
         };
 

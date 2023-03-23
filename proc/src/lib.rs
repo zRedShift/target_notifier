@@ -166,7 +166,7 @@ fn targets(
         },
     );
     output.extend(quote!(
-        #[derive(Debug, Clone, Copy)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #vis enum #target {
             #r#enum
             GLOBAL_SENDER,
@@ -199,8 +199,31 @@ fn targets(
     let from_id = servs.iter().fold(
         TokenStream2::new(),
         |mut output, Services { upper, id, ty, attr, .. }| {
+            output.extend(quote!(#attr));
             output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
-                quote!(#target::#upper (index) => match index {
+                quote!(#id => Self::#upper (id.index()),)
+            } else {
+                quote!(#id => Self::#upper,)
+            });
+            output
+        },
+    );
+    output.extend(quote!(
+        impl From<#crate_path::ID> for #target {
+            fn from(id: #crate_path::ID) -> Self {
+                match id.id() {
+                    #from_id
+                    _ => #target ::GLOBAL_SENDER
+                }
+            }
+        }
+    ));
+
+    let from_for_id = servs.iter().fold(
+        TokenStream2::new(),
+        |mut output, Services { upper, id, ty, attr, .. }| {
+            output.extend(if matches!(ty, FieldTypes::Array(_, _)) {
+                quote!(#attr #target::#upper (index) => match index {
                     Some(index) => #crate_path::ID::new(#id).set_index(index),
                     None => #crate_path::ID::new(#id)
                 }.set_name(target.into()),)
@@ -214,7 +237,7 @@ fn targets(
         impl From<#target> for #crate_path::ID {
             fn from(target: #target) -> Self {
                 match target {
-                    #from_id
+                    #from_for_id
                     #target ::GLOBAL_SENDER => #crate_path::ID::new(usize::MAX).set_name(target.into())
                 }
             }
@@ -271,96 +294,151 @@ fn targets(
     output
 }
 
-fn channel_get(
-    name: &Ident,
-    crate_path: &TokenStream2,
-    target: &Ident,
-    servs: &Vec<Services>,
-) -> TokenStream2 {
-    let mut output = TokenStream2::new();
-
-    servs
-        .iter()
-        .filter(|Services { ty, .. }| matches!(ty, FieldTypes::Array(_, _)))
-        .for_each(|Services { upper, ident, ty, attr, .. }| {
-            let (count, (preffix, suffix)) = match ty {
-                FieldTypes::Array(ty, ret) => (ret, match ty.as_ref() {
-                    FieldTypes::Tuple(_) => (quote!(&), quote!(.0)),
-                    _ => (quote!(), quote!()),
-                }),
-                _ => todo!(),
-            };
-            output.extend(quote!(
-                #attr
-                impl #crate_path::ChannelGet<{ #target::#upper (None).id() }, {#count}> for #name {
-                    fn get(&self, index: usize) -> &dyn #crate_path::DynamicServiceId {
-                        #preffix self.#ident.get(index).expect(#crate_path::INCORRECT_INDEX)#suffix
-                    }
-                }
-            ))
-        });
-
-    output
-}
-
 fn service_get(
     name: &Ident,
     crate_path: &TokenStream2,
     target: &Ident,
     servs: &Vec<Services>,
 ) -> TokenStream2 {
+    type Map<'a> = linked_hash_map::LinkedHashMap<&'a Type, Vec<Output<'a>>>;
+    struct Output<'a> {
+        ident: &'a Ident,
+        attr: &'a TokenStream2,
+        id: TokenStream2,
+        id_m: TokenStream2,
+        _index: TokenStream2, 
+        preffix: TokenStream2, 
+        suffix: TokenStream2,
+    }
+
     let mut output = TokenStream2::new();
+    let mut sorted_servs = Map::new();
 
     servs.iter().for_each(|Services { upper, ident, ty, attr, .. }| {
-        let make = |
-            id: &TokenStream2, 
-            ty: &Type, 
-            index: &TokenStream2, 
-            preffix: &TokenStream2, 
-            suffix: &TokenStream2
-        | -> TokenStream2 {
-            quote!(
-                #attr
-                impl #crate_path::ServiceGet<{ #target::#id.id() }, #ty> for #name {
-                    fn get(&self, #index: Option<usize>) -> &'_ dyn #crate_path::DynamicService<#ty> {
-                        #preffix self.#ident #suffix
-                    }
+        fn make1<'a>(
+            map: &mut Map<'a>,
+            id: (TokenStream2, TokenStream2), 
+            ty: &'a Type, 
+            _index: TokenStream2, 
+            preffix: TokenStream2, 
+            suffix: TokenStream2,
+            ident: &'a Ident,
+            attr: &'a TokenStream2,
+         ) {
+            let data = Output {
+                id: id.0,
+                id_m: id.1,
+                _index,
+                preffix,
+                suffix,
+                ident,
+                attr,
+            };
+            match map.get_mut(ty) {
+                Some(vec) => vec.push(data),
+                None => {
+                    map.insert(ty, vec![data]);
                 }
-            )
-        };
+            }
+        }
 
-        let make = |
-            ty: &FieldTypes, 
-            id: &TokenStream2, 
-            _index: &TokenStream2,
-            preffix: &TokenStream2, 
-            suffix: &TokenStream2
-        | {
+        fn make2<'a>(
+            map: &mut Map<'a>,
+            ty: &FieldTypes<'a>, 
+            id: (TokenStream2, TokenStream2), 
+            _index: TokenStream2,
+            preffix: (TokenStream2, bool), 
+            suffix: TokenStream2,
+            ident: &'a Ident,
+            attr: &'a TokenStream2,
+         ) {
             match ty {
                 FieldTypes::Once(ty, _) => {
-                    make(id, ty, _index, preffix, suffix)
+                    make1(map, id, ty, _index, preffix.0, suffix, ident, attr)
                 },
-                FieldTypes::Tuple(vec) => vec.into_iter().enumerate().fold(TokenStream2::new(), |mut output, (index, (ty, _))| {
+                FieldTypes::Tuple(vec) => vec.iter().enumerate().for_each(|(index, (ty, _))| {
                     let index = Literal::usize_unsuffixed(index);
-                    output.extend(
-                    make(id, ty, _index, &quote!(&), &quote!(#suffix.#index))
-                    );
-                    output
+                    let preffix = if preffix.1 {
+                        let preffix = &preffix.0;
+                        quote!(& #preffix)
+                    } else {
+                        quote!(&)
+                    };
+                    make1(map, id.clone(), ty, _index.clone(), preffix, quote!(#suffix.#index), ident, attr);
                 }),
                 FieldTypes::Array(_, _) => todo!(),
             }
-        };
+        }
 
-        output.extend(match ty {
+        match ty {
             FieldTypes::Array(ty, _) => match ty.as_ref() {
-                FieldTypes::Once(_, _) | FieldTypes::Tuple(_) => make(ty, &quote!(#upper (None)), &quote!(index), &quote!(), &quote!(
-                    .get(index.expect(#crate_path::INCORRECT_INDEX)).expect(#crate_path::INCORRECT_INDEX)
-                )),
+                FieldTypes::Once(_, _) | FieldTypes::Tuple(_) => {
+                    make2(
+                        &mut sorted_servs, 
+                        ty, 
+                        (quote!(#upper (index)), quote!(#upper (None))), 
+                        quote!(index), 
+                        (quote!(match ), true), 
+                        quote!(.get(match index {
+                                ::core::option::Option::Some(index) => index,
+                                ::core::option::Option::None => return ::core::option::Option::None,
+                            }) {
+                                ::core::option::Option::Some(service) => service,
+                                ::core::option::Option::None => return ::core::option::Option::None,
+                            }
+                        ), 
+                        ident, 
+                        attr
+                    )
+                },
                 FieldTypes::Array(_, _) => todo!(),
             },
-            _ => make(ty, &quote!(#upper), &quote!(_), &quote!(&), &quote!())
-        })
+            _ => make2(
+                &mut sorted_servs, 
+                ty, 
+                (quote!(#upper), quote!(#upper)), 
+                quote!(_), 
+                (quote!(&), false), 
+                quote!(), 
+                ident, 
+                attr
+            )
+        }
     });
+
+    let mut markers = TokenStream2::new();
+    for (ty, vec) in sorted_servs {
+        let mut body = TokenStream2::new();
+        for Output { 
+            ident, 
+            id, 
+            id_m,
+            preffix, 
+            suffix,
+            attr,
+            ..
+        } in vec {
+            body.extend(quote!(
+                #attr
+                #target ::#id => { #preffix self. #ident #suffix }
+            ));
+            markers.extend(quote!(
+                #attr
+                impl #crate_path::marker::ServiceGet<{ #target ::#id_m .id() }, #ty> for #name {}
+            ))
+        }
+        output.extend(quote! { 
+        impl #crate_path::ServiceGet<#ty> for #name {
+            fn get(&self, id: impl Into<#crate_path ::ID>) -> ::core::option::Option<&'_ dyn #crate_path::DynamicService<#ty>> {
+                let id: #crate_path ::ID = id.into();
+                ::core::option::Option::Some(match #target ::from(id) {
+                    #body
+                    _ => return ::core::option::Option::None
+                })
+            }
+        } })
+    }
+    output.extend(markers);
 
     output
 }
@@ -483,7 +561,6 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
     let target = attrs.get("targets").unwrap();
 
     let targets = targets(vis, &crate_path, target, &parsed);
-    let channel_get = channel_get(name, &crate_path, target, &parsed);
     let service_get = service_get(name, &crate_path, target, &parsed);
     let notifier_senders = notifier_senders(name, &crate_path, &parsed);
     let notifier = {
@@ -495,9 +572,9 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
         let mut output = TokenStream2::new();
 
         let alias = Ident::new(&(name.to_string()+"Channel"), name.span());
-        output.extend(quote!(#vis type #alias <'a, const I: usize> = #crate_path::Channel<'a, I, #name, #target>;));
+        output.extend(quote!(#vis type #alias <'a, const ID: usize> = #crate_path::Channel<'a, #name, #target, ID>;));
         let alias = Ident::new(&(name.to_string()+"Channels"), name.span());
-        output.extend(quote!(#vis type #alias <'a, const I: usize, const U: usize> = #crate_path::Channels<'a, I, U, #name, #target>;));
+        output.extend(quote!(#vis type #alias <'a, const ID: usize, const U: usize> = #crate_path::Channels<'a, U, #name, #target, ID>;));
         let alias = Ident::new(&(name.to_string()+"Sender"), name.span());
         output.extend(quote!(#vis type #alias <'a> = #crate_path::Sender<'a, #name>;));
         let alias = Ident::new(&(name.to_string()+"Receiver"), name.span());
@@ -513,13 +590,13 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
             output.extend(quote!(#attr));
             output.extend(match ty {
                 FieldTypes::Once(_, _) | FieldTypes::Tuple(_) => quote!(
-                    pub fn #ident(&self) -> #crate_path::Channel<'_, { #target::#upper.id() }, Self, #target> {
-                        self.into()
+                    pub fn #ident(&self) -> #crate_path ::Channel<'_, Self, #target, { #target::#upper.id() }> {
+                        #crate_path ::Channel::new(&self, #target::#upper)
                     }
                 ),
                 FieldTypes::Array(_, expr) => quote!(
-                    pub fn #ident(&self) -> #crate_path::Channels<'_, { #target::#upper(None).id() }, { #expr }, Self, #target> {
-                        #crate_path::Channels::new(&self)
+                        pub fn #ident(&self) -> #crate_path ::Channels<'_, { #expr }, Self, #target, { #target::#upper(None).id() }> {
+                        #crate_path ::Channels::new(&self, #target::#upper(None))
                     }
                 ),
             });
@@ -576,7 +653,6 @@ fn notifier_impl(input: &ItemStruct) -> TokenStream2 {
     quote!(
         #aliases
         #targets
-        #channel_get
         #service_get
         #notifier_senders
         #notifier
