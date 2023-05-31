@@ -32,7 +32,7 @@ target-notifier-proc = { path = "./proc" }
 log = "0.4.17"
 
 [dependencies.embassy-sync]
-version = "0.1.0"
+version = "0.2.0"
 optional = true
 
 [dependencies.async-std]
